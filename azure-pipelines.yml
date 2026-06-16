@@ -10,7 +10,7 @@ variables:
 - group: docker-secrets
 
 - name: dockerHubUser
-  value: 'spkumardocker'
+  value: 'ram1993'
 
 - name: dockerHubRepo
   value: 'java-aks-app'
