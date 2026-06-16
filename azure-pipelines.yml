@@ -1,0 +1,167 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- group: docker-secrets
+
+- name: dockerHubUser
+  value: 'spkumardocker'
+
+- name: dockerHubRepo
+  value: 'java-aks-app'
+
+- name: imageTag
+  value: '$(Build.BuildId)'
+
+- name: imageName
+  value: '$(dockerHubUser)/$(dockerHubRepo)'
+
+- name: kubernetesServiceConnection
+  value: 'aks-service-connection'
+
+- name: namespace
+  value: 'default'
+
+stages:
+
+- stage: Build
+  displayName: Build Java Application
+
+  jobs:
+  - job: MavenBuild
+    displayName: Maven Build
+
+    steps:
+    - checkout: self
+
+    - script: |
+        sudo apt-get update
+        sudo apt-get install -y openjdk-17-jdk maven git
+
+        java -version
+        mvn -version
+        git --version
+      displayName: Install Java Maven Git
+
+    - script: |
+        mvn clean package
+      displayName: Maven Clean Package
+
+    - publish: target
+      artifact: maven-target
+      displayName: Publish Maven Target Folder
+
+
+- stage: DockerHub
+  displayName: Build and Push Docker Image
+  dependsOn: Build
+
+  jobs:
+  - job: DockerBuildPush
+    displayName: DockerHub Build Push
+
+    steps:
+    - checkout: self
+
+    - download: current
+      artifact: maven-target
+      displayName: Download Maven Target Folder
+
+    - script: |
+        mkdir -p target
+        cp $(Pipeline.Workspace)/maven-target/*.jar target/
+        ls -l target/
+      displayName: Prepare JAR for Docker Build
+
+    - script: |
+        echo "$DOCKERHUB_TOKEN" | docker login \
+          -u "$(dockerHubUser)" \
+          --password-stdin
+      displayName: DockerHub Login
+      env:
+        DOCKERHUB_TOKEN: $(DOCKERHUB_TOKEN)
+
+    - script: |
+        docker build -t $(imageName):$(imageTag) .
+        docker tag $(imageName):$(imageTag) $(imageName):latest
+        docker images
+      displayName: Build Docker Image
+
+    - script: |
+        docker push $(imageName):$(imageTag)
+        docker push $(imageName):latest
+      displayName: Push Docker Image
+
+
+- stage: Deploy
+  displayName: Deploy to AKS
+  dependsOn: DockerHub
+
+  jobs:
+  - job: DeployToAKS
+    displayName: Deploy Application to AKS
+
+    steps:
+    - checkout: self
+
+    - task: Kubernetes@1
+      displayName: Apply Deployment
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+        namespace: '$(namespace)'
+        command: apply
+        useConfigurationFile: true
+        configuration: 'k8s/deployment.yaml'
+
+    - task: Kubernetes@1
+      displayName: Apply Service
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+        namespace: '$(namespace)'
+        command: apply
+        useConfigurationFile: true
+        configuration: 'k8s/service.yaml'
+
+    - task: Kubernetes@1
+      displayName: Update Deployment Image
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+        namespace: '$(namespace)'
+        command: set
+        arguments: 'image deployment/java-aks-app java-aks-app=$(imageName):$(imageTag)'
+
+    - task: Kubernetes@1
+      displayName: Rollout Status
+      continueOnError: true
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+        namespace: '$(namespace)'
+        command: rollout
+        arguments: 'status deployment/java-aks-app --timeout=300s'
+
+    - task: Kubernetes@1
+      displayName: Get Pods
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+        namespace: '$(namespace)'
+        command: get
+        arguments: 'pods -o wide'
+
+    - task: Kubernetes@1
+      displayName: Get Service
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+        namespace: '$(namespace)'
+        command: get
+        arguments: 'svc'
